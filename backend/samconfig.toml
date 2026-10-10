@@ -6,6 +6,6 @@ resolve_s3 = true
 s3_prefix = "rubber-duck"
 region = "us-east-1"
 capabilities = "CAPABILITY_IAM"
-disable_rollback = true
+disable_rollback = false
 parameter_overrides = "GeminiModel=\"gemini-3.8-flash\" EnvironmentName=\"prod\""
 image_repositories = []

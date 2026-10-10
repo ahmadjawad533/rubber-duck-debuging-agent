@@ -21,7 +21,7 @@ Parameters:
 
 Globals:
   Function:
-    Timeout: 25
+    Timeout: 75
     MemorySize: 256
     Architectures:
       - arm64
@@ -136,18 +136,10 @@ Resources:
         Cors:
           AllowOrigins:
             - "*"
-            - "http://localhost:5173"
           AllowMethods:
-            - GET
-            - POST
             - "*"
           AllowHeaders:
-            - Content-Type
-            - content-type
-            - Authorization
-            - authorization
-            - X-Requested-With
-            - x-requested-with
+            - "*"
           MaxAge: 3600
       Tags:
         Project: RubberDuck

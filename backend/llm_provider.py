@@ -75,12 +75,15 @@ class GeminiProvider(LLMProvider):
         req = urllib.request.Request(
             url,
             data=data,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "x-goog-api-key": self.api_key,
+            },
             method="POST",
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=20) as resp:
+            with urllib.request.urlopen(req, timeout=60) as resp:
                 resp_body = resp.read().decode("utf-8")
                 return json.loads(resp_body)
         except urllib.error.HTTPError as e:

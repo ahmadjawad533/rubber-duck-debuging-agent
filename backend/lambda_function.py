@@ -18,15 +18,15 @@ from typing import Any, Dict, Optional
 import boto3
 
 try:
-    from agent import RubberDuckAgent
-    from db import Database
-    from llm_provider import GeminiProvider, MockLLMProvider
-    import metrics
-except ImportError:
     from backend.agent import RubberDuckAgent
     from backend.db import Database
-    from backend.llm_provider import GeminiProvider, MockLLMProvider
+    from backend.llm_provider import GeminiProvider, MockLLMProvider, ModelBusyError
     from backend import metrics
+except ImportError:
+    from agent import RubberDuckAgent
+    from db import Database
+    from llm_provider import GeminiProvider, MockLLMProvider, ModelBusyError
+    import metrics
 
 
 logger = logging.getLogger()
@@ -76,7 +76,13 @@ def get_dependencies():
             _LLM_PROVIDER = MockLLMProvider()
         else:
             api_key = get_gemini_api_key()
-            _LLM_PROVIDER = GeminiProvider(api_key=api_key)
+            primary_model = os.environ.get("GEMINI_MODEL")
+            fallback_model = os.environ.get("GEMINI_FALLBACK_MODEL")
+            _LLM_PROVIDER = GeminiProvider(
+                api_key=api_key,
+                model=primary_model,
+                fallback_model=fallback_model,
+            )
 
     return _DB, _LLM_PROVIDER
 
@@ -132,20 +138,32 @@ def handle_chat(event_body: Dict[str, Any], db: Database, llm_provider: Any) -> 
     show_me_used = session.get("show_me_used", False) if session else False
     created_at = session.get("created_at") if session else int(time.time())
 
+    agent = RubberDuckAgent(llm_provider)
+    try:
+        result = agent.process_message(
+            session_id=session_id,
+            user_message=message,
+            history=history,
+            current_streak=current_streak,
+            hints_used=hints_used,
+            question_count=question_count,
+            show_me_used=show_me_used,
+        )
+    except Exception as e:
+        if isinstance(e, ModelBusyError) or type(e).__name__ == "ModelBusyError":
+            logger.warning("Gemini model busy in handle_chat: %s", e)
+            return build_response(
+                503,
+                {
+                    "error": "MODEL_BUSY",
+                    "message": "The duck is paddling hard right now. Give it a few seconds and try again.",
+                },
+            )
+        raise
+
     if is_new_session:
         metrics.record_session_started()
         db.record_new_session_stat()
-
-    agent = RubberDuckAgent(llm_provider)
-    result = agent.process_message(
-        session_id=session_id,
-        user_message=message,
-        history=history,
-        current_streak=current_streak,
-        hints_used=hints_used,
-        question_count=question_count,
-        show_me_used=show_me_used,
-    )
 
     # Append to history
     history.append({"role": "user", "content": message, "timestamp": int(time.time())})
@@ -311,6 +329,15 @@ def _process_event(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             },
         )
     except Exception as e:
+        if isinstance(e, ModelBusyError) or type(e).__name__ == "ModelBusyError":
+            logger.warning("ModelBusyError in lambda handler: %s", e)
+            return build_response(
+                503,
+                {
+                    "error": "MODEL_BUSY",
+                    "message": "The duck is paddling hard right now. Give it a few seconds and try again.",
+                },
+            )
         logger.exception("Unexpected error in lambda_handler: %s", e)
         return build_response(
             500,

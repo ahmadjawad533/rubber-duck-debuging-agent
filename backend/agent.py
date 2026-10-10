@@ -13,9 +13,9 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 try:
-    from llm_provider import LLMProvider
+    from backend.llm_provider import LLMProvider, ModelBusyError
 except ImportError:
-    from backend.llm_provider import LLMProvider
+    from llm_provider import LLMProvider, ModelBusyError
 
 
 logger = logging.getLogger(__name__)

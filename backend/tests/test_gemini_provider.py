@@ -1,9 +1,11 @@
 """Unit tests for GeminiProvider JSON parsing, thinkingConfig, and truncated output recovery."""
 
 import json
+import socket
+import urllib.error
 from unittest.mock import MagicMock, patch
 import pytest
-from backend.llm_provider import GeminiProvider
+from backend.llm_provider import GeminiProvider, ModelBusyError
 
 
 def test_thinking_config_generation():
@@ -125,3 +127,182 @@ def test_max_tokens_triggers_retry():
     # Successfully parsed output
     assert result["reply"] == "What is the type of that variable on line 12?"
     assert result["state"] == "asking"
+
+
+def test_timeout_and_retries_constants():
+    provider = GeminiProvider(api_key="test-key")
+    assert provider.URLOPEN_TIMEOUT == 12.0
+    assert provider.MAX_RETRIES == 2
+    assert provider.TOTAL_DEADLINE_SECONDS == 20.0
+    assert provider.DEFAULT_FALLBACK_MODEL == "gemini-3.5-flash-lite"
+
+
+@patch("time.sleep")
+def test_retry_on_503_success(mock_sleep):
+    provider = GeminiProvider(api_key="test-key", model="gemini-3.8-flash")
+    call_count = 0
+
+    resp_success = {
+        "candidates": [
+            {
+                "content": {"parts": [{"text": '{"reply": "What did you expect here?", "state": "asking"}'}]},
+                "finishReason": "STOP",
+            }
+        ]
+    }
+
+    def mock_execute(payload, timeout=12.0):
+        nonlocal call_count
+        call_count += 1
+        assert timeout <= 12.0
+        if call_count == 1:
+            raise urllib.error.HTTPError("http://gemini", 503, "High Demand", {}, None)
+        return resp_success
+
+    provider._execute_api_call = mock_execute
+
+    result = provider.generate(
+        system_instruction="duck instructions",
+        history=[],
+        user_message="Bug on line 5",
+    )
+
+    assert call_count == 2
+    assert mock_sleep.called
+    assert result["reply"] == "What did you expect here?"
+    assert result["state"] == "asking"
+
+
+@patch("time.sleep")
+def test_retry_on_timeout_success(mock_sleep):
+    provider = GeminiProvider(api_key="test-key", model="gemini-3.8-flash")
+    call_count = 0
+
+    resp_success = {
+        "candidates": [
+            {
+                "content": {"parts": [{"text": '{"reply": "Did the function return yet?", "state": "asking"}'}]},
+                "finishReason": "STOP",
+            }
+        ]
+    }
+
+    def mock_execute(payload, timeout=12.0):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise socket.timeout("Read timed out")
+        return resp_success
+
+    provider._execute_api_call = mock_execute
+
+    result = provider.generate(
+        system_instruction="duck instructions",
+        history=[],
+        user_message="It hangs",
+    )
+
+    assert call_count == 2
+    assert mock_sleep.called
+    assert result["reply"] == "Did the function return yet?"
+
+
+@patch("time.sleep")
+def test_fallback_to_secondary_model_on_503(mock_sleep):
+    provider = GeminiProvider(
+        api_key="test-key",
+        model="gemini-3.8-flash",
+        fallback_model="gemini-3.5-flash-lite",
+    )
+    models_called = []
+
+    resp_fallback_success = {
+        "candidates": [
+            {
+                "content": {"parts": [{"text": '{"reply": "From fallback duck: check line 10.", "state": "hint"}'}]},
+                "finishReason": "STOP",
+            }
+        ]
+    }
+
+    def mock_execute(payload, timeout=12.0):
+        models_called.append(provider.model)
+        if provider.model == "gemini-3.8-flash":
+            raise urllib.error.HTTPError("http://gemini", 503, "High demand", {}, None)
+        return resp_fallback_success
+
+    provider._execute_api_call = mock_execute
+
+    result = provider.generate(
+        system_instruction="duck instructions",
+        history=[],
+        user_message="hint",
+    )
+
+    # Primary model called 3 times (1 initial + 2 retries)
+    assert models_called.count("gemini-3.8-flash") == 3
+    # Fallback model was tried and succeeded
+    assert "gemini-3.5-flash-lite" in models_called
+    assert result["reply"] == "From fallback duck: check line 10."
+    assert result["state"] == "hint"
+
+
+@patch("time.sleep")
+def test_fallback_to_secondary_model_on_timeout(mock_sleep):
+    provider = GeminiProvider(
+        api_key="test-key",
+        model="gemini-3.8-flash",
+        fallback_model="gemini-3.5-flash-lite",
+    )
+    models_called = []
+
+    resp_fallback_success = {
+        "candidates": [
+            {
+                "content": {"parts": [{"text": '{"reply": "Check the loop condition.", "state": "asking"}'}]},
+                "finishReason": "STOP",
+            }
+        ]
+    }
+
+    def mock_execute(payload, timeout=12.0):
+        models_called.append(provider.model)
+        if provider.model == "gemini-3.8-flash":
+            raise TimeoutError("Socket timeout")
+        return resp_fallback_success
+
+    provider._execute_api_call = mock_execute
+
+    result = provider.generate(
+        system_instruction="duck instructions",
+        history=[],
+        user_message="infinite loop",
+    )
+
+    assert models_called.count("gemini-3.8-flash") == 3
+    assert "gemini-3.5-flash-lite" in models_called
+    assert result["reply"] == "Check the loop condition."
+
+
+@patch("time.sleep")
+def test_all_models_fail_raises_model_busy_error(mock_sleep):
+    provider = GeminiProvider(
+        api_key="test-key",
+        model="gemini-3.8-flash",
+        fallback_model="gemini-3.5-flash-lite",
+    )
+
+    def mock_execute(payload, timeout=12.0):
+        raise urllib.error.HTTPError("http://gemini", 503, "High demand on all models", {}, None)
+
+    provider._execute_api_call = mock_execute
+
+    with pytest.raises(ModelBusyError) as exc_info:
+        provider.generate(
+            system_instruction="duck instructions",
+            history=[],
+            user_message="Cannot connect",
+        )
+
+    assert "experiencing high demand" in str(exc_info.value)
+

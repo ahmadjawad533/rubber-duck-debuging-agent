@@ -6,7 +6,7 @@ from moto import mock_aws
 import pytest
 from backend import lambda_function
 from backend.db import Database, SESSIONS_TABLE, STATS_TABLE
-from backend.llm_provider import MockLLMProvider
+from backend.llm_provider import MockLLMProvider, ModelBusyError
 
 
 @pytest.fixture(autouse=True)
@@ -148,4 +148,91 @@ def test_function_url_cors_deduplication():
     assert "Access-Control-Allow-Methods" not in resp["headers"]
     assert "Access-Control-Allow-Headers" not in resp["headers"]
     assert resp["headers"]["Content-Type"] == "application/json"
+
+
+def test_chat_model_busy_returns_503_and_preserves_session(mock_aws_services):
+    # Pre-populate a session with question_count=2 and history
+    db = lambda_function._DB
+    session_id = "busy-session-test"
+    initial_history = [
+        {"role": "user", "content": "hello", "timestamp": 100},
+        {"role": "duck", "content": "quack", "timestamp": 101},
+    ]
+    db.save_session(
+        session_id=session_id,
+        history=initial_history,
+        question_count=2,
+        hints_used=0,
+        state="asking",
+        solved=False,
+        show_me_used=False,
+        streak=1,
+    )
+    # Ensure session updated_at is in the past to satisfy rate limiting
+    session_record = db.get_session(session_id)
+    session_record["updated_at"] = 100
+    if db._has_ddb:
+        db.sessions_table.put_item(Item=session_record)
+    db._memory_sessions[session_id] = session_record
+
+    # Mock LLM provider to raise ModelBusyError
+    class BusyProvider:
+        def generate(self, *args, **kwargs):
+            raise ModelBusyError("Gemini is under high demand")
+
+    lambda_function._LLM_PROVIDER = BusyProvider()
+
+    event = {
+        "requestContext": {"http": {"method": "POST"}},
+        "rawPath": "/chat",
+        "body": json.dumps({
+            "session_id": session_id,
+            "message": "Still have a bug here",
+        }),
+    }
+    resp = lambda_function.lambda_handler(event, None)
+
+    # Must return HTTP 503
+    assert resp["statusCode"] == 503
+    body = json.loads(resp["body"])
+    assert body == {
+        "error": "MODEL_BUSY",
+        "message": "The duck is paddling hard right now. Give it a few seconds and try again.",
+    }
+
+    # Verify session was NOT updated in DynamoDB
+    saved_session = db.get_session(session_id)
+    assert saved_session["question_count"] == 2
+    assert len(saved_session["history"]) == 2
+    assert saved_session["history"] == initial_history
+
+
+def test_chat_new_session_model_busy_does_not_create_session(mock_aws_services):
+    db = lambda_function._DB
+    session_id = "new-busy-session-123"
+
+    class BusyProvider:
+        def generate(self, *args, **kwargs):
+            raise ModelBusyError("Gemini is under high demand")
+
+    lambda_function._LLM_PROVIDER = BusyProvider()
+
+    event = {
+        "requestContext": {"http": {"method": "POST"}},
+        "rawPath": "/chat",
+        "body": json.dumps({
+            "session_id": session_id,
+            "message": "First message on new session",
+        }),
+    }
+    resp = lambda_function.lambda_handler(event, None)
+
+    assert resp["statusCode"] == 503
+    body = json.loads(resp["body"])
+    assert body["error"] == "MODEL_BUSY"
+
+    # Verify session was never saved
+    saved_session = db.get_session(session_id)
+    assert saved_session is None
+
 

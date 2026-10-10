@@ -10,7 +10,7 @@ export const EmptyState: React.FC = () => {
     {
       title: 'JavaScript Undefined Error',
       icon: <Terminal className="w-4 h-4 text-duck-500" />,
-      snippet: "TypeError: Cannot read properties of undefined (reading 'map') at UserList.tsx:24",
+      snippet: "TypeError: Cannot read properties of undefined (reading 'items') in fetchUserData()",
     },
     {
       title: 'Python Index Error',
@@ -44,7 +44,7 @@ export const EmptyState: React.FC = () => {
         <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-400 dark:text-ink-500 px-1">
           Or try a classic debugging scenario:
         </span>
-        {exampleBugs.map((bug, idx) => (
+        {(exampleBugs ?? []).map((bug, idx) => (
           <button
             key={idx}
             onClick={() => sendMessage(bug.snippet)}

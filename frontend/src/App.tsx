@@ -66,17 +66,17 @@ export const App: React.FC = () => {
         <main className="flex-1 flex flex-col h-[calc(100vh-4rem)] max-w-3xl mx-auto w-full">
           {/* Scrollable Chat Stream */}
           <div className="flex-1 overflow-y-auto px-4 py-6 scroll-smooth">
-            {messages.length === 0 ? (
+            {(messages ?? []).length === 0 ? (
               <EmptyState />
             ) : (
               <div className="space-y-1">
-                {messages.map((msg, index) => {
+                {(messages ?? []).map((msg, index) => {
                   const isLatestDuck =
-                    msg.role === 'duck' &&
-                    index === messages.length - 1;
+                    msg?.role === 'duck' &&
+                    index === (messages ?? []).length - 1;
                   return (
                     <ChatMessageItem
-                      key={msg.id}
+                      key={msg?.id ?? index}
                       message={msg}
                       isLatestDuckMessage={isLatestDuck}
                     />

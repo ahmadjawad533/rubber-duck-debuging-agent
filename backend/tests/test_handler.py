@@ -129,3 +129,23 @@ def test_malformed_json_body():
     assert resp["statusCode"] == 400
     body = json.loads(resp["body"])
     assert body["error"] == "BAD_REQUEST"
+
+
+def test_function_url_cors_deduplication():
+    # Simulate an AWS Lambda Function URL event
+    event = {
+        "version": "2.0",
+        "rawPath": "/health",
+        "requestContext": {
+            "domainName": "kfc3vyzesu6zggzpfgywr5rmhi0vdeqn.lambda-url.us-east-1.on.aws",
+            "http": {"method": "GET"},
+        },
+    }
+    resp = lambda_function.lambda_handler(event, None)
+    assert resp["statusCode"] == 200
+    # Function URL response must NOT have Access-Control-* headers to avoid duplicates
+    assert "Access-Control-Allow-Origin" not in resp["headers"]
+    assert "Access-Control-Allow-Methods" not in resp["headers"]
+    assert "Access-Control-Allow-Headers" not in resp["headers"]
+    assert resp["headers"]["Content-Type"] == "application/json"
+

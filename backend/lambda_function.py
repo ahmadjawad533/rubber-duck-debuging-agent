@@ -220,8 +220,33 @@ def handle_stats(db: Database) -> Dict[str, Any]:
     return build_response(200, stats)
 
 
-def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    """AWS Lambda entry point for Function URL or API Gateway."""
+def is_function_url_request(event: Optional[Dict[str, Any]]) -> bool:
+    """Check if the invocation comes through an AWS Lambda Function URL."""
+    if not event or not isinstance(event, dict):
+        return False
+    domain_name = event.get("requestContext", {}).get("domainName", "")
+    return ".lambda-url." in domain_name or domain_name.endswith(".on.aws")
+
+
+def sanitize_response(resp: Dict[str, Any], event: Dict[str, Any]) -> Dict[str, Any]:
+    """Sanitize response headers when invoked via Lambda Function URL.
+
+    AWS Lambda Function URL provides built-in CORS handling configured via
+    FunctionUrlConfig.Cors. If Lambda code also returns Access-Control-* headers,
+    AWS Function URL delivers DUPLICATE CORS headers to the client. Modern browsers
+    strictly reject multiple Access-Control-Allow-Origin headers with 'Failed to fetch'.
+    """
+    if is_function_url_request(event) and isinstance(resp, dict) and "headers" in resp:
+        headers = dict(resp["headers"])
+        headers.pop("Access-Control-Allow-Origin", None)
+        headers.pop("Access-Control-Allow-Methods", None)
+        headers.pop("Access-Control-Allow-Headers", None)
+        resp["headers"] = headers
+    return resp
+
+
+def _process_event(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    """Internal event processor for HTTP requests."""
     # Handle CORS OPTIONS
     http_method = (
         event.get("requestContext", {}).get("http", {}).get("method")
@@ -269,7 +294,6 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         if (path.endswith("/stats") or path == "/api/stats") and http_method == "GET":
             return handle_stats(db)
 
-
         return build_response(
             404,
             {
@@ -295,3 +319,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 "message": "The duck is taking a quick nap. Try again in a few seconds.",
             },
         )
+
+
+def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    """AWS Lambda entry point for Function URL or API Gateway."""
+    resp = _process_event(event, context)
+    return sanitize_response(resp, event)

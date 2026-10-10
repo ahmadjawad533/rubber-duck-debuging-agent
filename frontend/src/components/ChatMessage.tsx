@@ -20,7 +20,8 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
   const { recap, rated, rateSession } = useDuckStore();
 
   // Typewriter / word-by-word reveal effect for latest duck reply
-  const words = message.content.split(' ');
+  const content = message?.content ?? '';
+  const words = content ? content.split(' ') : [];
   const [revealedWordCount, setRevealedWordCount] = useState(
     isLatestDuckMessage ? 1 : words.length
   );
@@ -42,7 +43,7 @@ export const ChatMessageItem: React.FC<ChatMessageProps> = ({
 
   const displayedContent = isDuck
     ? words.slice(0, revealedWordCount).join(' ')
-    : message.content;
+    : content;
 
   const handleSkipReveal = () => {
     setRevealedWordCount(words.length);

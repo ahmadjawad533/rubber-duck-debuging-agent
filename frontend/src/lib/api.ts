@@ -1,8 +1,7 @@
 import { ChatResponse, StatsResponse } from '../types';
 
-const API_BASE_URL = (import.meta.env.VITE_API_URL || '/api').replace(/\/$/, '');
-
-
+const rawApiUrl = import.meta.env.VITE_API_URL;
+const API_BASE_URL = (rawApiUrl ? String(rawApiUrl).trim() : '/api').replace(/\/+$/, '');
 
 export class DuckApiError extends Error {
   code: string;
@@ -45,6 +44,13 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
       } catch {
         // use default message
       }
+      console.error(`[Rubber Duck API HTTP ${res.status}]`, {
+        endpoint,
+        url,
+        status: res.status,
+        statusText: res.statusText,
+        error: errorMsg,
+      });
       throw new DuckApiError(errorMsg, code, res.status);
     }
 
@@ -53,7 +59,15 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     if (err instanceof DuckApiError) {
       throw err;
     }
-    // Fetch failed due to network / CORS / offline
+    // Fetch failed due to network / CORS / offline - print detailed real cause to browser console
+    console.error('[Rubber Duck API Network/CORS Error]', {
+      endpoint,
+      url,
+      apiBaseUrl: API_BASE_URL,
+      cause: err,
+      message: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack : undefined,
+    });
     throw new DuckApiError(
       'The duck could not reach the pond. Please check your internet connection.',
       'NETWORK_ERROR'

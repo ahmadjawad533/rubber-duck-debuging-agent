@@ -76,7 +76,7 @@ const initialStreak = initialSaved?.streak || 0;
 
 export const useDuckStore = create<DuckStore>((set, get) => ({
   sessionId: initialSessionId,
-  messages: initialSaved?.messages || [],
+  messages: Array.isArray(initialSaved?.messages) ? initialSaved.messages : [],
   duckState: 'idle',
   streak: initialStreak,
   hintsUsed: initialSaved?.hintsUsed || 0,
@@ -107,7 +107,7 @@ export const useDuckStore = create<DuckStore>((set, get) => ({
     };
 
     set({
-      messages: [...messages, userMsg],
+      messages: [...(messages ?? []), userMsg],
       duckState: 'thinking',
       errorMessage: null,
       lastUserMessage: clean,
@@ -144,7 +144,7 @@ export const useDuckStore = create<DuckStore>((set, get) => ({
 
       set((state) => {
         const nextState = {
-          messages: [...state.messages, duckMsg],
+          messages: [...(state.messages ?? []), duckMsg],
           duckState: newDuckState,
           streak: resp.streak,
           hintsUsed: resp.hints_used,

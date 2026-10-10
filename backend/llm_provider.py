@@ -44,6 +44,7 @@ class GeminiProvider(LLMProvider):
     """
 
     DEFAULT_MODEL = "gemini-2.5-flash"
+    DEFAULT_FALLBACK_REPLY = "Quack. What line does the stack trace point to?"
 
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
@@ -56,6 +57,39 @@ class GeminiProvider(LLMProvider):
         self.endpoint_url = (
             f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
         )
+
+    def _get_thinking_config(self) -> Dict[str, Any]:
+        """Build thinkingConfig to minimize or disable thinking based on model family."""
+        model_lower = self.model.lower()
+        if "gemini-3" in model_lower:
+            # Gemini 3.8 & 3.7 Flash support 'low' to minimize latency and token consumption
+            return {"thinkingLevel": "low"}
+        else:
+            # Gemini 2.5 Flash / Flash Lite: thinkingBudget=0 disables thinking
+            return {"thinkingBudget": 0}
+
+    def _execute_api_call(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute HTTPS request to Gemini generateContent endpoint."""
+        url = f"{self.endpoint_url}?key={self.api_key}"
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                resp_body = resp.read().decode("utf-8")
+                return json.loads(resp_body)
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode("utf-8") if e.fp else ""
+            logger.error("Gemini API HTTP %d: %s", e.code, err_body)
+            raise RuntimeError(f"Gemini API returned HTTP {e.code}") from e
+        except urllib.error.URLError as e:
+            logger.error("Gemini API connection error: %s", e.reason)
+            raise RuntimeError(f"Failed to connect to Gemini API: {e.reason}") from e
 
     def generate(
         self,
@@ -74,48 +108,71 @@ class GeminiProvider(LLMProvider):
 
         contents.append({"role": "user", "parts": [{"text": user_message}]})
 
-        payload = {
+        # responseSchema ensures structured JSON containing {reply, state, recap}
+        response_schema = {
+            "type": "OBJECT",
+            "properties": {
+                "reply": {
+                    "type": "STRING",
+                    "description": "Exactly one short debugging question, hint, or celebration under 60 words",
+                },
+                "state": {
+                    "type": "STRING",
+                    "enum": ["asking", "hint", "solved", "revealed"],
+                    "description": "Current conversation state",
+                },
+                "recap": {
+                    "type": "STRING",
+                    "nullable": True,
+                    "description": "One-sentence recap if solved, otherwise null",
+                },
+            },
+            "required": ["reply", "state"],
+        }
+
+        generation_config: Dict[str, Any] = {
+            "responseMimeType": "application/json",
+            "responseSchema": response_schema,
+            "temperature": 0.4,
+            "maxOutputTokens": 1024,
+            "thinkingConfig": self._get_thinking_config(),
+        }
+
+        payload: Dict[str, Any] = {
             "system_instruction": {
                 "parts": [{"text": system_instruction}]
             },
             "contents": contents,
-            "generationConfig": {
-                "response_mime_type": "application/json",
-                "temperature": 0.4,
-                "maxOutputTokens": 300,
-            },
+            "generationConfig": generation_config,
         }
 
-        url = f"{self.endpoint_url}?key={self.api_key}"
-        data = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
+        parsed = self._execute_api_call(payload)
+        candidates = parsed.get("candidates", [])
+        if not candidates:
+            raise RuntimeError("No candidates returned from Gemini.")
 
-        try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                resp_body = resp.read().decode("utf-8")
-                parsed = json.loads(resp_body)
-                candidates = parsed.get("candidates", [])
-                if not candidates:
-                    raise RuntimeError("No candidates returned from Gemini.")
+        candidate = candidates[0]
+        finish_reason = candidate.get("finishReason")
 
-                raw_text = candidates[0]["content"]["parts"][0]["text"]
-                return self._parse_json_response(raw_text)
+        # Check finishReason: if MAX_TOKENS, retry once with a higher limit
+        if finish_reason == "MAX_TOKENS":
+            logger.warning("Gemini finishReason was MAX_TOKENS. Retrying once with maxOutputTokens=2048...")
+            payload["generationConfig"]["maxOutputTokens"] = 2048
+            retry_parsed = self._execute_api_call(payload)
+            retry_candidates = retry_parsed.get("candidates", [])
+            if retry_candidates:
+                candidate = retry_candidates[0]
 
-        except urllib.error.HTTPError as e:
-            err_body = e.read().decode("utf-8") if e.fp else ""
-            logger.error("Gemini API HTTP %d: %s", e.code, err_body)
-            raise RuntimeError(f"Gemini API returned HTTP {e.code}") from e
-        except urllib.error.URLError as e:
-            logger.error("Gemini API connection error: %s", e.reason)
-            raise RuntimeError(f"Failed to connect to Gemini API: {e.reason}") from e
+        parts = candidate.get("content", {}).get("parts", [])
+        raw_text = parts[0].get("text", "") if parts else ""
+        return self._parse_json_response(raw_text)
 
     def _parse_json_response(self, text: str) -> Dict[str, Any]:
-        """Safely parse structured JSON response with regex fallbacks."""
+        """Safely parse structured JSON response with regex fallbacks.
+
+        Guarantees that raw JSON syntax or corrupted brackets are NEVER returned
+        to the end-user.
+        """
         cleaned = text.strip()
         # Remove potential markdown code fences ```json ... ```
         if cleaned.startswith("```"):
@@ -123,27 +180,68 @@ class GeminiProvider(LLMProvider):
             cleaned = re.sub(r"\s*```$", "", cleaned)
             cleaned = cleaned.strip()
 
+        # 1. Attempt standard JSON parsing
         try:
             res = json.loads(cleaned)
             if isinstance(res, dict) and "reply" in res:
-                return res
+                reply_val = str(res["reply"]).strip()
+                if reply_val and not reply_val.startswith("{"):
+                    return {
+                        "reply": reply_val,
+                        "state": res.get("state", "asking") if res.get("state") in ["asking", "hint", "solved", "revealed"] else "asking",
+                        "recap": res.get("recap"),
+                    }
         except json.JSONDecodeError:
             pass
 
-        # Try finding the first JSON object using regex
+        # 2. Try finding the first complete JSON object using regex
         match = re.search(r"\{.*\}", cleaned, re.DOTALL)
         if match:
             try:
                 res = json.loads(match.group(0))
                 if isinstance(res, dict) and "reply" in res:
-                    return res
+                    reply_val = str(res["reply"]).strip()
+                    if reply_val and not reply_val.startswith("{"):
+                        return {
+                            "reply": reply_val,
+                            "state": res.get("state", "asking") if res.get("state") in ["asking", "hint", "solved", "revealed"] else "asking",
+                            "recap": res.get("recap"),
+                        }
             except json.JSONDecodeError:
                 pass
 
-        # Fallback if structure is malformed
-        logger.warning("Could not parse structured JSON from LLM: %s", text)
+        # 3. Extract the reply text if JSON was cut off/truncated
+        # Handles e.g. '{\n "reply": "What is the length of' or '{"reply": "Check line 42", "state":'
+        reply_match = re.search(r'"reply"\s*:\s*"([^"\\]*(?:\\.[^"\\]*)*)', cleaned)
+        if reply_match:
+            extracted = reply_match.group(1).strip()
+            # Clean up escape sequences if needed
+            try:
+                extracted = extracted.encode().decode("unicode-escape")
+            except Exception:
+                pass
+            extracted = extracted.strip()
+
+            # Extract state if present (even if closing quote was truncated)
+            state_match = re.search(r'"state"\s*:\s*"([^",\s}]+)"?', cleaned)
+            extracted_state = state_match.group(1).strip() if state_match else "asking"
+            if extracted_state not in ["asking", "hint", "solved", "revealed"]:
+                extracted_state = "asking"
+
+
+            # Ensure extracted text does not look like raw JSON syntax
+            if extracted and not any(extracted.startswith(c) for c in ["{", "}", "[", "]", ":"]):
+                logger.info("Extracted partial reply from truncated JSON: %s", extracted)
+                return {
+                    "reply": extracted,
+                    "state": extracted_state,
+                    "recap": None,
+                }
+
+        # 4. Fallback: NEVER return raw JSON text to the user.
+        logger.warning("Could not safely parse JSON from LLM: %r", text)
         return {
-            "reply": cleaned[:180] if cleaned else "Quack. What line does the stack trace point to?",
+            "reply": self.DEFAULT_FALLBACK_REPLY,
             "state": "asking",
             "recap": None,
         }

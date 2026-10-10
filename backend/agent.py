@@ -155,7 +155,11 @@ class RubberDuckAgent:
         )
 
         reply = llm_result.get("reply", "Quack. What line throws that error?").strip()
+        # Guard against raw JSON syntax escaping to the user
+        if reply.startswith("{") or '"reply":' in reply:
+            reply = "Quack. What line does the stack trace point to?"
         state = llm_result.get("state", "asking").strip().lower()
+
         recap = llm_result.get("recap")
 
         # Override state if explicit commands were invoked

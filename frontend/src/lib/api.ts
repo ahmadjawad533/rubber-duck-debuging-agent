@@ -1,6 +1,8 @@
 import { ChatResponse, StatsResponse } from '../types';
 
-const API_BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
+const API_BASE_URL = (import.meta.env.VITE_API_URL || '/api').replace(/\/$/, '');
+
+
 
 export class DuckApiError extends Error {
   code: string;

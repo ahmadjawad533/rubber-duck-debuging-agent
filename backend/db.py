@@ -24,20 +24,37 @@ class Database:
     """DynamoDB Session and Stats Database Manager."""
 
     def __init__(self, dynamodb_resource: Optional[Any] = None):
-        self.dynamodb = dynamodb_resource or boto3.resource(
-            "dynamodb", region_name=os.environ.get("AWS_REGION", "us-east-1")
-        )
-        self.sessions_table = self.dynamodb.Table(SESSIONS_TABLE)
-        self.stats_table = self.dynamodb.Table(STATS_TABLE)
+        self._memory_sessions: Dict[str, Dict[str, Any]] = {}
+        self._memory_stats: Dict[str, int] = {
+            "total_sessions": 0,
+            "bugs_solved": 0,
+            "solved_without_show_me": 0,
+            "total_questions_solved": 0,
+            "total_ratings": 0,
+            "positive_ratings": 0,
+        }
+        try:
+            self.dynamodb = dynamodb_resource or boto3.resource(
+                "dynamodb", region_name=os.environ.get("AWS_REGION", "us-east-1")
+            )
+            self.sessions_table = self.dynamodb.Table(SESSIONS_TABLE)
+            self.stats_table = self.dynamodb.Table(STATS_TABLE)
+            self._has_ddb = True
+        except Exception as e:
+            logger.warning("DynamoDB not configured, using in-memory store: %s", e)
+            self._has_ddb = False
 
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve session record by session_id."""
+        if not self._has_ddb:
+            return self._memory_sessions.get(session_id)
         try:
             resp = self.sessions_table.get_item(Key={"session_id": session_id})
             return resp.get("Item")
-        except ClientError as e:
-            logger.error("Failed to fetch session %s: %s", session_id, e)
-            return None
+        except Exception as e:
+            logger.warning("Failed to fetch session %s from DynamoDB, using fallback: %s", session_id, e)
+            return self._memory_sessions.get(session_id)
+
 
     def save_session(
         self,
@@ -75,10 +92,13 @@ class Database:
             "ttl": ttl,
         }
 
-        try:
-            self.sessions_table.put_item(Item=item)
-        except ClientError as e:
-            logger.error("Failed to save session %s: %s", session_id, e)
+        self._memory_sessions[session_id] = item
+
+        if self._has_ddb:
+            try:
+                self.sessions_table.put_item(Item=item)
+            except Exception as e:
+                logger.warning("Failed to save session %s to DynamoDB: %s", session_id, e)
 
         return item
 
@@ -94,15 +114,17 @@ class Database:
 
     def increment_global_stat(self, metric: str, amount: int = 1) -> None:
         """Atomically increment a global metric in the stats table."""
-        try:
-            self.stats_table.update_item(
-                Key={"stat_id": "global"},
-                UpdateExpression=f"ADD #m :val",
-                ExpressionAttributeNames={"#m": metric},
-                ExpressionAttributeValues={":val": amount},
-            )
-        except ClientError as e:
-            logger.error("Failed to increment stat %s: %s", metric, e)
+        self._memory_stats[metric] = self._memory_stats.get(metric, 0) + amount
+        if self._has_ddb:
+            try:
+                self.stats_table.update_item(
+                    Key={"stat_id": "global"},
+                    UpdateExpression=f"ADD #m :val",
+                    ExpressionAttributeNames={"#m": metric},
+                    ExpressionAttributeValues={":val": amount},
+                )
+            except Exception as e:
+                logger.warning("Failed to increment stat %s in DynamoDB: %s", metric, e)
 
     def record_new_session_stat(self) -> None:
         """Record a newly initiated session in global stats."""
@@ -117,29 +139,39 @@ class Database:
 
     def record_rating_stat(self, session_id: str, rating: str) -> bool:
         """Save user thumbs up/down rating on a session and update stats."""
-        try:
-            self.sessions_table.update_item(
-                Key={"session_id": session_id},
-                UpdateExpression="SET #r = :val, updated_at = :now",
-                ExpressionAttributeNames={"#r": "rating"},
-                ExpressionAttributeValues={":val": rating, ":now": int(time.time())},
-            )
-            self.increment_global_stat("total_ratings", 1)
-            if rating == "up":
-                self.increment_global_stat("positive_ratings", 1)
-            return True
-        except ClientError as e:
-            logger.error("Failed to record rating for session %s: %s", session_id, e)
-            return False
+        if session_id in self._memory_sessions:
+            self._memory_sessions[session_id]["rating"] = rating
+            self._memory_sessions[session_id]["updated_at"] = int(time.time())
+
+        self.increment_global_stat("total_ratings", 1)
+        if rating == "up":
+            self.increment_global_stat("positive_ratings", 1)
+
+        if self._has_ddb:
+            try:
+                self.sessions_table.update_item(
+                    Key={"session_id": session_id},
+                    UpdateExpression="SET #r = :val, updated_at = :now",
+                    ExpressionAttributeNames={"#r": "rating"},
+                    ExpressionAttributeValues={":val": rating, ":now": int(time.time())},
+                )
+            except Exception as e:
+                logger.warning("Failed to record rating in DynamoDB for session %s: %s", session_id, e)
+
+        return True
 
     def get_stats(self) -> Dict[str, Any]:
         """Fetch live stats aggregated for the Results / Stats page."""
-        try:
-            resp = self.stats_table.get_item(Key={"stat_id": "global"})
-            item = resp.get("Item", {})
-        except ClientError as e:
-            logger.error("Failed to fetch global stats: %s", e)
-            item = {}
+        item = dict(self._memory_stats)
+        if self._has_ddb:
+            try:
+                resp = self.stats_table.get_item(Key={"stat_id": "global"})
+                ddb_item = resp.get("Item")
+                if ddb_item:
+                    item = ddb_item
+            except Exception as e:
+                logger.warning("Failed to fetch global stats from DynamoDB: %s", e)
+
 
         total_sessions = int(item.get("total_sessions", 0))
         bugs_solved = int(item.get("bugs_solved", 0))

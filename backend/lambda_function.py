@@ -257,17 +257,18 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             elif isinstance(raw_body, dict):
                 body = raw_body
 
-        if path in ["/health", ""]:
+        if path in ["/health", "", "/api/health", "/api"] or path.endswith("/health"):
             return handle_health()
 
-        if path.endswith("/chat") and http_method == "POST":
+        if (path.endswith("/chat") or path == "/api/chat") and http_method == "POST":
             return handle_chat(body, db, llm_provider)
 
-        if path.endswith("/rate") and http_method == "POST":
+        if (path.endswith("/rate") or path == "/api/rate") and http_method == "POST":
             return handle_rate(body, db)
 
-        if path.endswith("/stats") and http_method == "GET":
+        if (path.endswith("/stats") or path == "/api/stats") and http_method == "GET":
             return handle_stats(db)
+
 
         return build_response(
             404,

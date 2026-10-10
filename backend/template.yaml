@@ -1,0 +1,166 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Rubber Duck - AI Debugging Companion for AWS Builder Center Hackathon.
+  Serverless backend running on AWS Lambda (arm64, Python 3.12) with DynamoDB and Gemini LLM.
+
+Parameters:
+  GeminiApiKey:
+    Type: String
+    Description: Google Gemini API key from Google AI Studio. Leave empty if storing in SSM.
+    NoEcho: true
+    Default: ""
+  GeminiModel:
+    Type: String
+    Description: Gemini model name
+    Default: "gemini-2.5-flash"
+  EnvironmentName:
+    Type: String
+    Description: Deployment environment
+    Default: "Production"
+
+Globals:
+  Function:
+    Timeout: 25
+    MemorySize: 256
+    Architectures:
+      - arm64
+    Runtime: python3.12
+    Tracing: Active
+    Environment:
+      Variables:
+        GEMINI_API_KEY: !Ref GeminiApiKey
+        GEMINI_MODEL: !Ref GeminiModel
+        GEMINI_SSM_PARAM_NAME: "/rubber-duck/gemini-api-key"
+        SESSIONS_TABLE: !Ref SessionsTable
+        STATS_TABLE: !Ref StatsTable
+        METRICS_NAMESPACE: "RubberDuck"
+        ENVIRONMENT: !Ref EnvironmentName
+
+Resources:
+  # ------------------------------------------------------------
+  # DynamoDB Tables (On-Demand / Free Tier Friendly)
+  # ------------------------------------------------------------
+  SessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "RubberDuckSessions-${EnvironmentName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: session_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Project
+          Value: RubberDuck
+
+  StatsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "RubberDuckStats-${EnvironmentName}"
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: stat_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: stat_id
+          KeyType: HASH
+      Tags:
+        - Key: Project
+          Value: RubberDuck
+
+  # ------------------------------------------------------------
+  # Lambda Execution IAM Role with Least Privilege
+  # ------------------------------------------------------------
+  RubberDuckFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogsAndMetrics
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*"
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                Resource:
+                  - !GetAtt SessionsTable.Arn
+                  - !GetAtt StatsTable.Arn
+        - PolicyName: SSMAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource: !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/rubber-duck/*"
+
+  # ------------------------------------------------------------
+  # Backend Lambda Function with Function URL
+  # ------------------------------------------------------------
+  RubberDuckFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "rubber-duck-api-${EnvironmentName}"
+      CodeUri: .
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt RubberDuckFunctionRole.Arn
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowOrigins:
+            - "*"
+          AllowMethods:
+            - GET
+            - POST
+            - OPTIONS
+          AllowHeaders:
+            - Content-Type
+            - Authorization
+            - X-Requested-With
+          MaxAge: 3600
+      Tags:
+        Project: RubberDuck
+
+Outputs:
+  RubberDuckFunctionUrl:
+    Description: "Public HTTPS URL for the Rubber Duck Backend Lambda Function URL"
+    Value: !GetAtt RubberDuckFunctionUrl.FunctionUrl
+
+  RubberDuckFunctionName:
+    Description: "Lambda Function Name (for CloudWatch logs inspection)"
+    Value: !Ref RubberDuckFunction
+
+  SessionsTableName:
+    Description: "DynamoDB Sessions Table Name"
+    Value: !Ref SessionsTable
+
+  StatsTableName:
+    Description: "DynamoDB Stats Table Name"
+    Value: !Ref StatsTable

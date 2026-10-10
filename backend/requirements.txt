@@ -1,0 +1,7 @@
+# Rubber Duck Backend Dependencies
+# Note: boto3 is pre-installed in the AWS Lambda Python runtime.
+# The production deployment has ZERO external dependencies for ultra-fast arm64 cold starts!
+# These packages are for local development, linting, and running unit tests:
+pytest>=8.0.0
+boto3>=1.34.0
+moto>=5.0.0
